@@ -9,28 +9,29 @@
 #
 ######################################################################
 
+from __future__ import print_function
 import hashlib
 import json
 import os.path
 import random
 import re
 import shutil
+import six
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 
-
 USAGE = """
 This program tests the B2 command-line client.
 
 Usages:
 
-    {command} <path_to_b2_script> <accountId> <applicationKey> [basic | sync]
+    {command} <accountId> <applicationKey> [basic | sync]
 
         The optional last argument specifies which of the tests to run.  If not
-        specified, all test will run.
+        specified, all test will run.  Runs the b2 package in the current directory.
 
     {command} test
 
@@ -39,12 +40,12 @@ Usages:
 
 
 def usage_and_exit():
-    print >>sys.stderr, USAGE.format(command=sys.argv[0])
+    print(USAGE.format(command=sys.argv[0]), file=sys.stderr)
     sys.exit(1)
 
 
 def error_and_exit(message):
-    print 'ERROR:', message
+    print('ERROR:', message)
     sys.exit(1)
 
 
@@ -59,14 +60,16 @@ def write_file(path, contents):
 
 
 def file_mod_time_millis(path):
-    return int(1000 * os.path.getmtime(path))
+    return int(round(1000 * os.path.getmtime(path)))
 
 
 def random_hex(length):
-    return ''.join(random.choice('0123456789abcdef') for i in xrange(length))
+    return ''.join(random.choice('0123456789abcdef') for i in six.moves.xrange(length))
 
 
 class TempDir(object):
+    def __init__(self):
+        self.dirpath = None
 
     def get_dir(self):
         return self.dirpath
@@ -79,8 +82,9 @@ class TempDir(object):
         shutil.rmtree(self.dirpath)
 
 
-
 class StringReader(object):
+    def __init__(self):
+        self.string = None
 
     def get_string(self):
         return self.string
@@ -89,15 +93,34 @@ class StringReader(object):
         try:
             self.string = f.read()
         except Exception as e:
-            print e
+            print(e)
             self.string = str(e)
 
 
-def run_command(command):
+def remove_insecure_platform_warnings(text):
+    return '\n'.join(
+        line for line in text.split('\n')
+        if ('SNIMissingWarning' not in line) and ('InsecurePlatformWarning' not in line)
+    )
+
+
+def run_command(path_to_script, args):
     """
     :param command: A list of strings like ['ls', '-l', '/dev']
     :return: (status, stdout, stderr)
     """
+
+    # We'll run the b2 command-line by running the b2 module from
+    # the current directory.  Python 2.6 doesn't support using
+    # '-m' with a package, so we explicitly say to run the module
+    # b2.__main__
+    os.environ['PYTHONPATH'] = '.'
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+    command = ['python', '-m', 'b2.__main__']
+    command.extend(args)
+
+    print('Running:', ' '.join(command))
+
     stdout = StringReader()
     stderr = StringReader()
     p = subprocess.Popen(
@@ -115,7 +138,12 @@ def run_command(command):
     p.wait()
     reader1.join()
     reader2.join()
-    return (p.returncode, stdout.get_string(), stderr.get_string())
+
+    stdout_decoded = remove_insecure_platform_warnings(stdout.get_string().decode('utf-8'))
+    stderr_decoded = remove_insecure_platform_warnings(stderr.get_string().decode('utf-8'))
+
+    print_output(p.returncode, stdout_decoded, stderr_decoded)
+    return p.returncode, stdout_decoded, stderr_decoded
 
 
 def print_text_indented(text):
@@ -123,7 +151,7 @@ def print_text_indented(text):
     Prints text that may include weird characters, indented four spaces.
     """
     for line in text.split('\n'):
-        print '   ', repr(line)[1:-1]
+        print('   ', repr(line)[1:-1])
 
 
 def print_json_indented(value):
@@ -134,14 +162,14 @@ def print_json_indented(value):
 
 
 def print_output(status, stdout, stderr):
-    print '  status:', status
+    print('  status:', status)
     if stdout != '':
-        print '  stdout:'
+        print('  stdout:')
         print_text_indented(stdout)
     if stderr != '':
-        print '  stderr:'
+        print('  stderr:')
         print_text_indented(stderr)
-    print
+    print()
 
 
 class CommandLine(object):
@@ -162,25 +190,24 @@ class CommandLine(object):
         if there was an error; otherwise, returns the stdout of the command
         as as string.
         """
-        command = [self.path_to_script] + args
-        print 'Running:', ' '.join(command)
-        (status, stdout, stderr) = run_command(command)
-        print_output(status, stdout, stderr)
+        status, stdout, stderr = run_command(self.path_to_script, args)
         if status != 0:
-            print 'FAILED with status', status
+            print('FAILED with status', status)
             sys.exit(1)
         if stderr != '':
             failed = False
-            for line in map(lambda s: s.strip(), stderr.split('\n')):
+            for line in (s.strip() for s in stderr.split('\n')):
                 if not any(p.match(line) for p in self.EXPECTED_STDERR_PATTERNS):
-                    print 'Unexpected stderr line:', repr(line)
+                    print('Unexpected stderr line:', repr(line))
                     failed = True
             if failed:
-                print 'FAILED because of stderr'
-                print stderr
+                print('FAILED because of stderr')
+                print(stderr)
                 sys.exit(1)
         if expected_pattern is not None:
             if re.search(expected_pattern, stdout) is None:
+                print('STDOUT:')
+                print(stdout)
                 error_and_exit('did not match pattern: ' + expected_pattern)
         return stdout
 
@@ -197,12 +224,9 @@ class CommandLine(object):
         Runs the command-line with the given args, expecting the given pattern
         to appear in stderr.
         """
-        command = [self.path_to_script] + args
-        print 'Running:', ' '.join(command)
-        (status, stdout, stderr) = run_command(command)
-        print_output(status, stdout, stderr)
+        status, stdout, stderr = run_command(self.path_to_script, args)
         if status == 0:
-            print 'ERROR: should have failed'
+            print('ERROR: should have failed')
             sys.exit(1)
         if re.search(expected_pattern, stdout + stderr) is None:
             error_and_exit('did not match pattern: ' + expected_pattern)
@@ -212,7 +236,6 @@ class CommandLine(object):
 
 
 class TestCommandLine(unittest.TestCase):
-
     def test_stderr_patterns(self):
         progress_bar_line = './b2:   0%|          | 0.00/33.3K [00:00<?, ?B/s]\r./b2:  25%|\xe2\x96\x88\xe2\x96\x88\xe2\x96\x8d       | 8.19K/33.3K [00:00<00:01, 21.7KB/s]\r./b2: 33.3KB [00:02, 12.1KB/s]'
         self.assertIsNotNone(CommandLine.PROGRESS_BAR_PATTERN.match(progress_bar_line))
@@ -221,14 +244,14 @@ class TestCommandLine(unittest.TestCase):
 
 
 def should_equal(expected, actual):
-    print '  expected:'
+    print('  expected:')
     print_json_indented(expected)
-    print '  actual:'
+    print('  actual:')
     print_json_indented(actual)
     if expected != actual:
-        print '  ERROR'
+        print('  ERROR')
         sys.exit(1)
-    print
+    print()
 
 
 def delete_files_in_bucket(b2_tool, bucket_name):
@@ -238,7 +261,11 @@ def delete_files_in_bucket(b2_tool, bucket_name):
         if len(files) == 0:
             return
         for file_info in files:
-            b2_tool.should_succeed(['delete_file_version', file_info['fileName'], file_info['fileId']])
+            b2_tool.should_succeed(
+                [
+                    'delete_file_version', file_info['fileName'], file_info['fileId']
+                ]
+            )
 
 
 def clean_buckets(b2_tool, bucket_name_prefix):
@@ -262,6 +289,7 @@ def clean_buckets(b2_tool, bucket_name_prefix):
             delete_files_in_bucket(b2_tool, bucket_name)
             b2_tool.should_succeed(['delete_bucket', bucket_name])
 
+
 def setup_envvar_test(envvar_name, envvar_value):
     """
     Establish config for environment variable test.
@@ -277,6 +305,7 @@ def setup_envvar_test(envvar_name, envvar_value):
     shutil.move(src, src + '.bkup')
     os.environ[envvar_name] = envvar_value
 
+
 def tearDown_envvar_test(envvar_name):
     """
     Clean up after running the environment variable test.
@@ -291,25 +320,52 @@ def tearDown_envvar_test(envvar_name):
     fname = os.path.expanduser('~/.b2_account_info')
     shutil.move(fname + '.bkup', fname)
     if os.environ.get(envvar_name) is not None:
-       del os.environ[envvar_name]
+        del os.environ[envvar_name]
 
 
 def basic_test(b2_tool, bucket_name):
 
-    path_to_script = b2_tool.path_to_script
+    file_to_upload = 'README.md'
 
-    with open(path_to_script, 'rb') as f:
-        hex_sha1 = hashlib.sha1(f.read()).hexdigest()
-    uploaded_a = b2_tool.should_succeed_json(['upload_file', '--quiet', bucket_name, path_to_script, 'a'])
-    b2_tool.should_succeed(['upload_file', bucket_name, path_to_script, 'a'])
-    b2_tool.should_succeed(['upload_file', bucket_name, path_to_script, 'b/1'])
-    b2_tool.should_succeed(['upload_file', bucket_name, path_to_script, 'b/2'])
-    b2_tool.should_succeed(['upload_file', '--sha1', hex_sha1, '--info', 'foo=bar=baz', '--info', 'color=blue', bucket_name, path_to_script, 'c'])
-    b2_tool.should_fail(['upload_file', '--sha1', hex_sha1, '--info', 'foo-bar', '--info', 'color=blue', bucket_name, path_to_script, 'c'], r'ERROR: Bad file info: foo-bar')
-    b2_tool.should_succeed(['upload_file', '--contentType', 'text/plain', bucket_name, path_to_script, 'd'])
+    hex_sha1 = hashlib.sha1(read_file(file_to_upload)).hexdigest()
 
-    b2_tool.should_succeed(['download_file_by_name', bucket_name, 'b/1', '/dev/null'])
-    b2_tool.should_succeed(['download_file_by_id', uploaded_a['fileId'], '/dev/null'])
+    uploaded_a = b2_tool.should_succeed_json(
+        [
+            'upload_file', '--noProgress', '--quiet', bucket_name, file_to_upload, 'a'
+        ]
+    )
+    b2_tool.should_succeed(['upload_file', '--noProgress', bucket_name, file_to_upload, 'a'])
+    b2_tool.should_succeed(['upload_file', '--noProgress', bucket_name, file_to_upload, 'b/1'])
+    b2_tool.should_succeed(['upload_file', '--noProgress', bucket_name, file_to_upload, 'b/2'])
+    b2_tool.should_succeed(
+        [
+            'upload_file', '--noProgress', '--sha1', hex_sha1, '--info', 'foo=bar=baz', '--info',
+            'color=blue', bucket_name, file_to_upload, 'c'
+        ]
+    )
+    b2_tool.should_fail(
+        [
+            'upload_file', '--noProgress', '--sha1', hex_sha1, '--info', 'foo-bar', '--info',
+            'color=blue', bucket_name, file_to_upload, 'c'
+        ], r'ERROR: Bad file info: foo-bar'
+    )
+    b2_tool.should_succeed(
+        [
+            'upload_file', '--noProgress', '--contentType', 'text/plain', bucket_name,
+            file_to_upload, 'd'
+        ]
+    )
+
+    b2_tool.should_succeed(
+        [
+            'download_file_by_name', '--noProgress', bucket_name, 'b/1', '/dev/null'
+        ]
+    )
+    b2_tool.should_succeed(
+        [
+            'download_file_by_id', '--noProgress', uploaded_a['fileId'], '/dev/null'
+        ]
+    )
 
     b2_tool.should_succeed(['hide_file', bucket_name, 'c'])
 
@@ -321,19 +377,37 @@ def basic_test(b2_tool, bucket_name):
     should_equal(['b/1', 'b/2'], [f['fileName'] for f in list_of_files['files']])
 
     list_of_files = b2_tool.should_succeed_json(['list_file_versions', bucket_name])
-    should_equal(['a', 'a', 'b/1', 'b/2', 'c', 'c', 'd'], [f['fileName'] for f in list_of_files['files']])
-    should_equal(['upload', 'upload', 'upload', 'upload', 'hide', 'upload', 'upload'], [f['action'] for f in list_of_files['files']])
+    should_equal(
+        ['a', 'a', 'b/1', 'b/2', 'c', 'c', 'd'], [
+            f['fileName'] for f in list_of_files['files']
+        ]
+    )
+    should_equal(
+        [
+            'upload', 'upload', 'upload', 'upload', 'hide', 'upload', 'upload'
+        ], [f['action'] for f in list_of_files['files']]
+    )
     first_c_version = list_of_files['files'][4]
     second_c_version = list_of_files['files'][5]
     list_of_files = b2_tool.should_succeed_json(['list_file_versions', bucket_name, 'c'])
     should_equal(['c', 'c', 'd'], [f['fileName'] for f in list_of_files['files']])
-    list_of_files = b2_tool.should_succeed_json(['list_file_versions', bucket_name, 'c', second_c_version['fileId']])
+    list_of_files = b2_tool.should_succeed_json(
+        [
+            'list_file_versions', bucket_name, 'c', second_c_version['fileId']
+        ]
+    )
     should_equal(['c', 'd'], [f['fileName'] for f in list_of_files['files']])
-    list_of_files = b2_tool.should_succeed_json(['list_file_versions', bucket_name, 'c', second_c_version['fileId'], '1'])
+    list_of_files = b2_tool.should_succeed_json(
+        [
+            'list_file_versions', bucket_name, 'c', second_c_version['fileId'], '1'
+        ]
+    )
     should_equal(['c'], [f['fileName'] for f in list_of_files['files']])
 
     b2_tool.should_succeed(['ls', bucket_name], r'^a\nb/\nd\n')
-    b2_tool.should_succeed(['ls', '--long', bucket_name], r'^4_z.*upload.*a\n.*-.*b/\n4_z.*upload.*d\n')
+    b2_tool.should_succeed(
+        ['ls', '--long', bucket_name], r'^4_z.*upload.*a\n.*-.*b/\n4_z.*upload.*d\n'
+    )
     b2_tool.should_succeed(['ls', '--versions', bucket_name], r'^a\na\nb/\nc\nc\nd\n')
     b2_tool.should_succeed(['ls', bucket_name, 'b'], r'^b/1\nb/2\n')
     b2_tool.should_succeed(['ls', bucket_name, 'b/'], r'^b/1\nb/2\n')
@@ -349,11 +423,11 @@ def basic_test(b2_tool, bucket_name):
     new_creds = '/tmp/b2_account_info'
     setup_envvar_test('B2_ACCOUNT_INFO', new_creds)
     b2_tool.should_succeed(['clear_account'])
-    if '{}' != read_file(os.path.expanduser(new_creds)):
-            error_and_exit('failed to clear ' + new_creds)
-    bad_application_key = sys.argv[3][:-8] + ''.join(reversed(sys.argv[3][-8:]))
-    b2_tool.should_fail(['authorize_account', sys.argv[2], bad_application_key], r'invalid authorization')
-    b2_tool.should_succeed(['authorize_account', sys.argv[2], sys.argv[3]])
+    bad_application_key = sys.argv[2][:-8] + ''.join(reversed(sys.argv[2][-8:]))
+    b2_tool.should_fail(
+        ['authorize_account', sys.argv[1], bad_application_key], r'nvalid authorization'
+    )
+    b2_tool.should_succeed(['authorize_account', sys.argv[1], sys.argv[2]])
     tearDown_envvar_test('B2_ACCOUNT_INFO')
 
 
@@ -365,10 +439,7 @@ def file_version_summary(list_of_files):
 
        ['+ photos/a.jpg', '- photos/b.jpg', '+ photos/c.jpg']
     """
-    return [
-        ('+ ' if (f['action'] == 'upload') else '- ') + f['fileName']
-        for f in list_of_files
-        ]
+    return [('+ ' if (f['action'] == 'upload') else '- ') + f['fileName'] for f in list_of_files]
 
 
 def find_file_id(list_of_files, file_name):
@@ -399,36 +470,47 @@ def _sync_test_using_dir(b2_tool, bucket_name, dir_):
 
         p = lambda fname: os.path.join(dir_path, fname)
 
-        b2_tool.should_succeed(['sync', dir_path, b2_sync_point])
+        b2_tool.should_succeed(['sync', '--noProgress', dir_path, b2_sync_point])
         file_versions = b2_tool.list_file_versions(bucket_name)
         should_equal([], file_version_summary(file_versions))
 
-        write_file(p('a'), 'hello')
-        write_file(p('b'), 'hello')
-        write_file(p('c'), 'hello')
+        write_file(p('a'), b'hello')
+        write_file(p('b'), b'hello')
+        write_file(p('c'), b'hello')
 
-        b2_tool.should_succeed(['sync', dir_path, b2_sync_point])
+        # simulate action (nothing should be uploaded)
+        b2_tool.should_succeed(['sync', '--noProgress', '--dryRun', dir_path, b2_sync_point])
+        file_versions = b2_tool.list_file_versions(bucket_name)
+        should_equal([], file_version_summary(file_versions))
+
+        os.symlink('broken', p('d'))
+
+        # now upload
+        b2_tool.should_succeed(
+            ['sync', '--noProgress', dir_path, b2_sync_point],
+            expected_pattern="/d could not be accessed"
+        )
         file_versions = b2_tool.list_file_versions(bucket_name)
         should_equal(
             [
                 '+ ' + prefix + 'a',
                 '+ ' + prefix + 'b',
                 '+ ' + prefix + 'c',
-            ],
-            file_version_summary(file_versions)
+            ], file_version_summary(file_versions)
         )
 
         c_id = find_file_id(file_versions, prefix + 'c')
         file_info = b2_tool.should_succeed_json(['get_file_info', c_id])['fileInfo']
-        should_equal(
-            file_mod_time_millis(p('a')),
-            int(file_info['src_last_modified_millis'])
-        )
+        should_equal(file_mod_time_millis(p('c')), int(file_info['src_last_modified_millis']))
 
         os.unlink(p('b'))
-        write_file(p('c'), 'hello world')
+        write_file(p('c'), b'hello world')
 
-        b2_tool.should_succeed(['sync', '--hide', dir_path, b2_sync_point])
+        b2_tool.should_succeed(
+            [
+                'sync', '--noProgress', '--keepDays', '10', dir_path, b2_sync_point
+            ]
+        )
         file_versions = b2_tool.list_file_versions(bucket_name)
         should_equal(
             [
@@ -437,23 +519,14 @@ def _sync_test_using_dir(b2_tool, bucket_name, dir_):
                 '+ ' + prefix + 'b',
                 '+ ' + prefix + 'c',
                 '+ ' + prefix + 'c',
-            ],
-            file_version_summary(file_versions)
+            ], file_version_summary(file_versions)
         )
 
         os.unlink(p('a'))
 
-        b2_tool.should_succeed(['sync', '--delete', dir_path, b2_sync_point])
+        b2_tool.should_succeed(['sync', '--noProgress', '--delete', dir_path, b2_sync_point])
         file_versions = b2_tool.list_file_versions(bucket_name)
-        should_equal(
-            [
-                '- ' + prefix + 'b',
-                '+ ' + prefix + 'b',
-                '+ ' + prefix + 'c',
-                '+ ' + prefix + 'c',
-            ],
-            file_version_summary(file_versions)
-        )
+        should_equal(['+ ' + prefix + 'c',], file_version_summary(file_versions))
 
 
 def sync_down_test(b2_tool, bucket_name):
@@ -462,14 +535,14 @@ def sync_down_test(b2_tool, bucket_name):
 
 def sync_down_helper(b2_tool, bucket_name, folder_in_bucket):
 
+    file_to_upload = 'README.md'
+
     b2_sync_point = 'b2:%s' % bucket_name
     if folder_in_bucket:
         b2_sync_point += '/' + folder_in_bucket
         b2_file_prefix = folder_in_bucket + '/'
     else:
         b2_file_prefix = ''
-
-    path_to_script = b2_tool.path_to_script
 
     with TempDir() as local_path:
 
@@ -478,18 +551,27 @@ def sync_down_helper(b2_tool, bucket_name, folder_in_bucket):
         should_equal([], sorted(os.listdir(local_path)))
 
         # Put a couple files in B2, and sync them down
-        b2_tool.should_succeed(['upload_file', bucket_name, path_to_script, b2_file_prefix + 'a'])
-        b2_tool.should_succeed(['upload_file', bucket_name, path_to_script, b2_file_prefix + 'b'])
+        b2_tool.should_succeed(
+            [
+                'upload_file', '--noProgress', bucket_name, file_to_upload, b2_file_prefix + 'a'
+            ]
+        )
+        b2_tool.should_succeed(
+            [
+                'upload_file', '--noProgress', bucket_name, file_to_upload, b2_file_prefix + 'b'
+            ]
+        )
         b2_tool.should_succeed(['sync', b2_sync_point, local_path])
         should_equal(['a', 'b'], sorted(os.listdir(local_path)))
 
+
 def main():
 
-    if len(sys.argv) < 4:
+    if len(sys.argv) < 3:
         usage_and_exit()
-    path_to_script = sys.argv[1]
-    account_id = sys.argv[2]
-    application_key = sys.argv[3]
+    path_to_script = 'b2'
+    account_id = sys.argv[1]
+    application_key = sys.argv[2]
 
     test_map = {
         'basic': basic_test,
@@ -498,33 +580,33 @@ def main():
         'sync_up_no_prefix': sync_test_no_prefix,
     }
 
-    if len(sys.argv) >= 5:
-        tests_to_run = sys.argv[4:]
+    if len(sys.argv) >= 4:
+        tests_to_run = sys.argv[3:]
+        for test_name in tests_to_run:
+            if test_name not in test_map:
+                error_and_exit('unknown test: ' + test_name)
     else:
-        tests_to_run = test_map.keys()
-    for test_name in tests_to_run:
-        if test_name not in test_map:
-            error_and_exit('unknown test: ' + test_name)
+        tests_to_run = sorted(six.iterkeys(test_map))
 
     if os.environ.get('B2_ACCOUNT_INFO') is not None:
-       del os.environ['B2_ACCOUNT_INFO']
+        del os.environ['B2_ACCOUNT_INFO']
 
     b2_tool = CommandLine(path_to_script)
 
     # Run each of the tests in its own empty bucket
     for test_name in tests_to_run:
 
-        print '#'
-        print '# Cleaning and making bucket for:', test_name
-        print '#'
-        print
+        print('#')
+        print('# Cleaning and making bucket for:', test_name)
+        print('#')
+        print()
 
         b2_tool.should_succeed(['clear_account'])
-        if '{}' != read_file(os.path.expanduser('~/.b2_account_info')):
-            error_and_exit('should have cleared ~/.b2_account_info')
 
         bad_application_key = application_key[:-8] + ''.join(reversed(application_key[-8:]))
-        b2_tool.should_fail(['authorize_account', account_id, bad_application_key], r'invalid authorization')
+        b2_tool.should_fail(
+            ['authorize_account', account_id, bad_application_key], r'Invalid authorization'
+        )
         b2_tool.should_succeed(['authorize_account', account_id, application_key])
 
         bucket_name_prefix = 'test-b2-command-line-' + account_id
@@ -534,16 +616,16 @@ def main():
         b2_tool.should_succeed(['create_bucket', bucket_name, 'allPrivate'])
         b2_tool.should_succeed(['update_bucket', bucket_name, 'allPublic'])
 
-        print '#'
-        print '# Running test:', test_name
-        print '#'
-        print
+        print('#')
+        print('# Running test:', test_name)
+        print('#')
+        print()
 
         test_fcn = test_map[test_name]
         test_fcn(b2_tool, bucket_name)
 
-    print
-    print "ALL OK"
+    print()
+    print("ALL OK")
 
 
 if __name__ == '__main__':
